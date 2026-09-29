@@ -2,20 +2,20 @@
 
 A scenario is a list of steps; each step is a one-key mapping::
 
-    name: Просроченные задачи с главной
-    app: kg.replai.revision
+    name: Overdue tasks from home
+    app: com.example.app
     steps:
       - launch: true                  # the scenario app, or a package name
-      - tap: Просрочено               # by label/hint; {text, nth} or [x, y]
-      - expect: Просроченные, 7       # waits up to timeout_ms; string or list
-      - expect_not: Ошибка
-      - input: {field: Найти задачу…, text: Созвон, clear: true}
-      - wait: {text: BI-1, timeout_ms: 5000, gone: false}
+      - tap: Overdue                  # by label/hint; {text, nth} or [x, y]
+      - expect: "Overdue, 7"          # waits up to 3 s; string or list
+      - expect_not: Error
+      - input: {field: Search tasks…, text: Standup, clear: true}
+      - wait: {text: TASK-1, timeout_ms: 5000, gone: false}
       - scroll: down                  # down | up | left | right
-      - long_press: MOB-3
+      - long_press: TASK-3
       - key: KEYCODE_ENTER
       - back: true
-      - open_link: revision://tasks/MOB-3
+      - open_link: example://tasks/TASK-3
       - screenshot: after-open        # saved into the run directory
       - sleep_ms: 300
       - stop: true

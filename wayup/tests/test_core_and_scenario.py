@@ -28,41 +28,41 @@ HOME = [
         cls="android.widget.Button",
         bounds=(0, 100, 600, 300),
         clickable="true",
-        **{"content-desc": "Просрочено: 7"},
+        **{"content-desc": "Overdue: 7"},
     ),
-    _node("Просрочено", bounds=(10, 210, 300, 290)),
-    _node("Просроченные задачи", bounds=(0, 400, 600, 500)),
+    _node("Overdue", bounds=(10, 210, 300, 290)),
+    _node("Overdue tasks", bounds=(0, 400, 600, 500)),
     _node(
         cls="android.widget.EditText",
         bounds=(0, 600, 1000, 700),
         clickable="true",
-        hint="Найти задачу…",
+        hint="Search tasks…",
     ),
-    _node("Готово", cls="android.widget.Button", bounds=(0, 800, 200, 900), clickable="true"),
-    _node("Готово", cls="android.widget.Button", bounds=(300, 800, 500, 900), clickable="true"),
+    _node("Done", cls="android.widget.Button", bounds=(0, 800, 200, 900), clickable="true"),
+    _node("Done", cls="android.widget.Button", bounds=(300, 800, 500, 900), clickable="true"),
 ]
 
 
 def test_exact_label_beats_substring():
-    assert find_by_text(HOME, "просрочено") == (155, 250)
+    assert find_by_text(HOME, "overdue") == (155, 250)
 
 
 def test_substring_prefers_interactive_element():
-    assert find_by_text(HOME, "Просрочено:") == (300, 200)
+    assert find_by_text(HOME, "Overdue:") == (300, 200)
 
 
 def test_field_lookup_matches_hint_of_inputs_only():
-    assert find_by_text(HOME, "найти задачу", field=True) == (500, 650)
-    assert find_by_text(HOME, "Готово", field=True) is None
+    assert find_by_text(HOME, "search tasks", field=True) == (500, 650)
+    assert find_by_text(HOME, "Done", field=True) is None
 
 
 def test_nth_picks_among_equal_matches():
-    assert find_by_text(HOME, "Готово", nth=2) == (400, 850)
-    assert find_by_text(HOME, "Готово", nth=3) is None
+    assert find_by_text(HOME, "Done", nth=2) == (400, 850)
+    assert find_by_text(HOME, "Done", nth=3) is None
 
 
 def test_element_at_point_is_the_smallest():
-    assert find_element_at(HOME, 20, 220)["text"] == "Просрочено"
+    assert find_element_at(HOME, 20, 220)["text"] == "Overdue"
 
 
 class FakeDevice:
@@ -117,14 +117,14 @@ def test_scenario_runs_steps_in_order(tmp_path):
     result = _run(
         tmp_path,
         """
-name: Главная
+name: Home
 app: kg.replai.revision
 steps:
   - launch: true
-  - tap: Просрочено
-  - input: {field: Найти задачу…, text: Созвон}
-  - expect: ["Просроченные задачи", "Просрочено: 7"]
-  - expect_not: Ошибка
+  - tap: Overdue
+  - input: {field: Search tasks…, text: Standup}
+  - expect: ["Overdue tasks", "Overdue: 7"]
+  - expect_not: Error
   - back: true
 """,
         device,
@@ -134,7 +134,7 @@ steps:
     assert device.actions == [
         ("launch", "kg.replai.revision"),
         ("tap", 155, 250),
-        ("input", "Найти задачу…", "Созвон", True),
+        ("input", "Search tasks…", "Standup", True),
         ("back",),
     ]
 
@@ -145,7 +145,7 @@ def test_scenario_stops_at_first_failure_and_saves_screenshot(tmp_path):
         tmp_path,
         """
 steps:
-  - expect: Нет такого
+  - expect: Missing
   - back: true
 """,
         device,

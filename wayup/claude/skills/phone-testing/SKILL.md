@@ -1,57 +1,57 @@
 ---
 name: phone-testing
-description: Тестирование мобильного приложения на Android-телефоне через MCP artemis (форк WayupKG/artemis). Используй, когда просят проверить, прогнать, протестировать сценарий на телефоне, снять экран приложения, воспроизвести баг на устройстве или записать/запустить YAML-сценарий.
+description: Testing a mobile app on an Android phone through the artemis MCP server (WayupKG/artemis fork). Use when asked to check, run or test a flow on the phone, capture an app screen, reproduce a bug on a device, or write/run a YAML phone scenario.
 ---
 
-# Тестирование на телефоне через artemis
+# Phone testing with artemis
 
-## Перед началом
-1. `current_app` — какое приложение сверху, какой телефон, можно ли вводить (`input_allowed`).
-   - `foreground: null` — экран заблокирован. Попроси разблокировать, PIN не вводи.
-   - `profile: null` — в проекте нет `.artemis.json`. Предложи создать:
-     `{"allowed_packages": ["<пакет приложения>"], "device": "<serial из list_devices>"}`.
-     Без него защита выключена, а телефон может быть личным.
-2. Если в проекте есть сценарии (обычно `phone-scenarios/*.yaml`) и просят «прогнать» —
-   сразу `run_scenario`, без ручных шагов.
+## Before you start
+1. Call `current_app`: foreground app, active device, and whether input is allowed (`input_allowed`).
+   - `foreground: null` means the screen is locked. Ask the user to unlock it; never enter a PIN.
+   - `profile: null` means the project has no `.artemis.json`. Offer to create one:
+     `{"allowed_packages": ["<app package>"], "device": "<serial from list_devices>"}`.
+     Without it the guard is off, and the phone may be a personal one.
+2. If the project has scenarios (usually `phone-scenarios/*.yaml`) and the user asks to
+   run them, call `run_scenario` directly instead of stepping manually.
 
-## Ручное исследование
-- Действия (`tap_text`, `tap`, `input_into`, `back`, `scroll`, `launch_app` …) сами
-  возвращают экран после того, как он успокоился. **Не вызывай `get_ui_hierarchy` после них.**
-- Нажимай по тексту: `tap_text("Просрочено")`, вводи по подписи поля:
-  `input_into("Найти задачу…", "Созвон")`. Координаты — только если у элемента нет текста.
-- Строка экрана: `[x,y] Class "подпись" флаги`; флаги `tap input scroll selected disabled …`.
-- Ждать загрузку — `wait_for("текст", timeout_ms=…)`, а не паузы.
-- Скриншот — только когда важен внешний вид (цвета, вёрстка): `take_screenshot`.
-  Для отчёта по багу — `take_screenshot(save_path=…)` и приложи файл к задаче.
-- Отказ «refused, foreground app is …» — сверху чужое приложение. Не обходи защиту,
-  запусти разрешённое приложение через `launch_app`.
+## Exploring manually
+- Actions (`tap_text`, `tap`, `input_into`, `back`, `scroll`, `launch_app`, ...) return the
+  screen once it has settled. **Do not call `get_ui_hierarchy` after them.**
+- Tap by text: `tap_text("Overdue")`; type by field label or hint:
+  `input_into("Search tasks…", "Standup")`. Use coordinates only for elements without text.
+- Screen line format: `[x,y] Class "label" flags`; flags are `tap input scroll selected disabled ...`.
+- Wait for loading with `wait_for("text", timeout_ms=...)`, not with sleeps.
+- Take a screenshot only when the visual matters (colors, layout): `take_screenshot`.
+  For a bug report use `take_screenshot(save_path=...)` and attach the file to the task.
+- "refused, foreground app is ..." means another app is on top. Do not work around the
+  guard; bring the allowed app back with `launch_app`.
 
-## Сценарий после исследования
-Когда путь пройден вручную, запиши его в YAML, чтобы следующий прогон шёл без модели:
+## Turning a flow into a scenario
+Once a path works manually, save it as YAML so the next run needs no model:
 
 ```yaml
-name: Просроченные задачи с главной
-app: kg.replai.revision
+name: Overdue tasks from home
+app: com.example.app
 steps:
   - launch: true
-  - tap: Главная
-  - tap: Просрочено
-  - expect: "Просроченные, 7"          # запятая внутри — бери в кавычки
-  - tap: Push-уведомления о назначениях
-  - expect: [В работе, Критический]
-  - screenshot: mob3-card
+  - tap: Home
+  - tap: Overdue
+  - expect: "Overdue, 7"          # quote values that contain commas
+  - tap: Push notifications for assignments
+  - expect: [In progress, Critical]
+  - screenshot: task-card
   - back: true
 ```
 
-Шаги: `launch`, `stop`, `tap` (текст, `{text, nth}` или `[x, y]`), `long_press`,
-`input: {field, text, clear}`, `expect` (ждёт до 3 с), `expect_not`,
+Steps: `launch`, `stop`, `tap` (text, `{text, nth}` or `[x, y]`), `long_press`,
+`input: {field, text, clear}`, `expect` (waits up to 3 s), `expect_not`,
 `wait: {text, timeout_ms, gone}`, `scroll: down|up|left|right`, `key`, `back`,
 `open_link`, `screenshot`, `sleep_ms`.
 
-Запуск: `run_scenario(["phone-scenarios"])` или из терминала
-`~/tools/artemis/.venv/bin/python -m wayup.scenario phone-scenarios` (код выхода 1 при падении).
-Результаты и скриншоты падений — в `.artemis/runs/` (добавь `.artemis/` в `.gitignore`).
+Run with `run_scenario(["phone-scenarios"])` or from a terminal:
+`~/tools/artemis/.venv/bin/python -m wayup.scenario phone-scenarios` (exit code 1 on failure).
+Results and failure screenshots go to `.artemis/runs/` (add `.artemis/` to `.gitignore`).
 
-## Что не делать
-- Не трогай данные без согласия: создание, удаление, отправка — только если просили.
-- Не вводи пароли и PIN владельца.
+## Don't
+- Don't change data without consent: create, delete or send only when asked.
+- Don't type the owner's passwords or PINs.

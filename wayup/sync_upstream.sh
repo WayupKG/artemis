@@ -7,12 +7,12 @@ cd "$(dirname "$0")/.."
 
 git fetch upstream
 if git merge-base --is-ancestor upstream/main HEAD; then
-  echo "Уже актуально: upstream/main влит."
+  echo "Up to date: upstream/main is already merged."
   exit 0
 fi
 
 git merge --no-edit upstream/main
-uv sync --dev --locked || echo "uv sync не прошёл — зависимости могли устареть"
+uv sync --dev --locked || echo "uv sync failed: dependencies may be stale"
 .venv/bin/python -m pytest wayup/tests -q -p no:cacheprovider
-.venv/bin/python -c "import asyncio; from wayup import server; print(len(asyncio.run(server.mcp.list_tools())), 'инструментов')"
-echo "Готово. Проверь и отправь: git push origin main"
+.venv/bin/python -c "import asyncio; from wayup import server; print(len(asyncio.run(server.mcp.list_tools())), 'tools')"
+echo "Done. Review, then push: git push origin main"

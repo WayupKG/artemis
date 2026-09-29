@@ -70,16 +70,16 @@ jobs:
         run: |
           git push origin "${{ steps.fetch.outputs.branch }}"
           status="${{ steps.tests.outcome }}"
-          title="Обновление от Google ($(date +%d.%m.%Y))"
-          [ "$status" = "success" ] || title="$title — тесты wayup упали"
+          title="Sync google/artemis ($(date +%Y-%m-%d))"
+          [ "$status" = "success" ] || title="$title: wayup tests failed"
           gh pr create --base main --head "${{ steps.fetch.outputs.branch }}" \
             --title "$title" \
-            --body "Влит google/artemis main. Тесты wayup: **$status**. Проверь и влей."
+            --body "Merged google/artemis main. wayup tests: **$status**. Review and merge."
 
       - name: Report conflict
         if: steps.merge.outputs.conflict == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh issue create --title "Обновление от Google: конфликт слияния" \
-            --body "Не удалось автоматически влить google/artemis main. Запусти wayup/sync_upstream.sh локально."
+          gh issue create --title "Sync google/artemis: merge conflict" \
+            --body "Could not merge google/artemis main automatically. Run wayup/sync_upstream.sh locally."
