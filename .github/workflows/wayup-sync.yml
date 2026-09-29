@@ -1,0 +1,85 @@
+name: Sync upstream (wayup)
+
+# Weekly: merge google/artemis main into our fork on a branch, run the wayup
+# tests and open a PR. Nothing reaches main without a human merge.
+on:
+  schedule:
+    - cron: "0 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch upstream
+        id: fetch
+        run: |
+          git config user.name "wayup-sync"
+          git config user.email "wayup-sync@users.noreply.github.com"
+          git remote add upstream https://github.com/google/artemis.git
+          git fetch upstream main
+          if git merge-base --is-ancestor upstream/main HEAD; then
+            echo "behind=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "behind=true" >> "$GITHUB_OUTPUT"
+            echo "branch=sync/upstream-$(date +%Y%m%d)" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Merge upstream
+        if: steps.fetch.outputs.behind == 'true'
+        id: merge
+        run: |
+          git checkout -b "${{ steps.fetch.outputs.branch }}"
+          if git merge --no-edit upstream/main; then
+            echo "conflict=false" >> "$GITHUB_OUTPUT"
+          else
+            git merge --abort
+            echo "conflict=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-python@v5
+        if: steps.merge.outputs.conflict == 'false'
+        with:
+          python-version: "3.12"
+
+      - uses: astral-sh/setup-uv@v6
+        if: steps.merge.outputs.conflict == 'false'
+
+      - name: Test wayup against new upstream
+        if: steps.merge.outputs.conflict == 'false'
+        id: tests
+        continue-on-error: true
+        run: |
+          uv sync --dev --locked
+          uv run pytest wayup/tests -q -p no:cacheprovider
+          uv run python -c "import asyncio; from wayup import server; print(len(asyncio.run(server.mcp.list_tools())))"
+
+      - name: Open PR
+        if: steps.merge.outputs.conflict == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git push origin "${{ steps.fetch.outputs.branch }}"
+          status="${{ steps.tests.outcome }}"
+          title="Обновление от Google ($(date +%d.%m.%Y))"
+          [ "$status" = "success" ] || title="$title — тесты wayup упали"
+          gh pr create --base main --head "${{ steps.fetch.outputs.branch }}" \
+            --title "$title" \
+            --body "Влит google/artemis main. Тесты wayup: **$status**. Проверь и влей."
+
+      - name: Report conflict
+        if: steps.merge.outputs.conflict == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh issue create --title "Обновление от Google: конфликт слияния" \
+            --body "Не удалось автоматически влить google/artemis main. Запусти wayup/sync_upstream.sh локально."
