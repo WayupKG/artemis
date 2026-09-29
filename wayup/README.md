@@ -14,9 +14,12 @@ Google's updates merge without conflicts.
 | Screenshot | base64 as text, ~1000 ms | MCP image, ~400 ms |
 | Focusing a field before typing | ~2 s (hierarchy + fixed 1 s sleep) | waits for actual focus |
 | Tap / type by visible text | no | `tap_text`, `input_into`, `wait_for`; wait up to 3 s for the element |
+| Element under a tab bar or keyboard | tap lands on the overlay | taps the uncovered part, or names what covers it |
+| Scrolling a chip bar or a list in a sheet | middle of the screen only | `scroll(within=…)`, `scroll(until=…)` |
 | Launching an app | returns when the window shows | returns once the first screen has been still for 2 s |
 | Closing the keyboard | Back, which navigates away if no keyboard is up | `hide_keyboard`: Back only while the keyboard is shown |
 | Replay without a model | no | YAML scenarios, `run_scenario` / `python -m wayup.scenario` |
+| Weak checks in scenarios | — | `exact` matching; a note on an `expect` that was already true before the last action |
 | Personal phone guard | no | `.artemis.json` → `allowed_packages` |
 | Several devices | env only | `list_devices`, `select_device`, `device` in the profile |
 

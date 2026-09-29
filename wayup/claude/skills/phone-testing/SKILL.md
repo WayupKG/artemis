@@ -20,6 +20,11 @@ description: Testing a mobile app on an Android phone through the artemis MCP se
 - Tap by text: `tap_text("Overdue")`; type by field label or hint:
   `input_into("Search tasks…", "Standup")`. Use coordinates only for elements without text.
   Both wait up to 3 s for the element, so a sheet or screen that is still opening is fine.
+  If a tab bar or the keyboard is drawn over the element, its uncovered part is tapped;
+  a fully covered one is an error that names what covers it.
+- Scroll a horizontal chip bar or a list inside a sheet with
+  `scroll("left", within="<label of an element in it>")`; add `until="<label>"` to swipe
+  until that element can be tapped.
 - `launch_app` returns once the app's first screen has been still for 2 s; taps sent
   earlier are often lost to the splash and entry animations.
 - Close the keyboard with `hide_keyboard`, never with `back`: Back with no keyboard
@@ -50,8 +55,14 @@ steps:
 
 Steps: `launch`, `stop`, `tap` (text, `{text, nth, timeout_ms}` or `[x, y]`; waits up
 to 3 s for the text), `long_press`, `input: {field, text, clear}`, `hide_keyboard`,
-`expect` (waits up to 3 s), `expect_not`, `wait: {text, timeout_ms, gone}`,
-`scroll: down|up|left|right`, `key`, `back`, `open_link`, `screenshot`, `sleep_ms`.
+`expect` (waits up to 3 s; items are text or `{text, exact: true}`), `expect_not`,
+`wait: {text, timeout_ms, gone, exact}`, `scroll: down|up|left|right` or
+`scroll: {direction, within, until, max_swipes}`, `key`, `back`, `open_link`,
+`screenshot`, `sleep_ms`.
+
+Expect something that only the target screen has. Labels match by substring, so
+`expect: TASK-3` also passes on a list that shows TASK-3; the report adds a `note` when
+every expected text was already on screen before the last action.
 
 Run with `run_scenario(["phone-scenarios"])` or from a terminal:
 `PYTHONPATH=~/tools/artemis ~/tools/artemis/.venv/bin/python -m wayup.scenario phone-scenarios`

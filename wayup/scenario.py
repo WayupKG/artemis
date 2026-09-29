@@ -8,13 +8,18 @@ A scenario is a list of steps; each step is a one-key mapping::
       - launch: true                  # the scenario app, or a package name;
                                       # returns once the first screen is still
       - tap: Overdue                  # by label/hint, waits up to 3 s for it;
-                                      # {text, nth, timeout_ms} or [x, y]
-      - expect: "Overdue, 7"          # waits up to 3 s; string or list
+                                      # {text, nth, timeout_ms} or [x, y]; taps
+                                      # the uncovered part if a bar overlaps it
+      - expect: "Overdue, 7"          # waits up to 3 s; string or list; an item
+                                      # can be {text, exact: true}
       - expect_not: Error
       - input: {field: Search tasks…, text: Standup, clear: true}
       - hide_keyboard: true           # Back only if the keyboard is up
-      - wait: {text: TASK-1, timeout_ms: 5000, gone: false}
+      - wait: {text: TASK-1, timeout_ms: 5000, gone: false, exact: false}
       - scroll: down                  # down | up | left | right
+      - scroll: {direction: left, within: "Today, 1", until: "All tasks"}
+                                      # within: the scrollable container around
+                                      # this element; until: swipe until tappable
       - long_press: TASK-3
       - key: KEYCODE_ENTER
       - back: true
@@ -22,6 +27,9 @@ A scenario is a list of steps; each step is a one-key mapping::
       - screenshot: after-open        # saved into the run directory
       - sleep_ms: 300
       - stop: true
+
+An ``expect`` whose texts were all on screen already before the last action
+passes without proving that the action worked; the report notes it.
 
 Usage: ``python -m wayup.scenario path/to/file.yaml [more.yaml | dir ...]``.
 """
@@ -37,7 +45,14 @@ from typing import Any
 
 import yaml
 
-from wayup.core import FIND_TIMEOUT_MS, Device, DeviceError, find_by_text
+from wayup.core import (
+    FIND_TIMEOUT_MS,
+    SCROLL_MAX_SWIPES,
+    Device,
+    DeviceError,
+    Screen,
+    find_node_by_text,
+)
 
 DEFAULT_EXPECT_TIMEOUT_MS = 3000
 DEFAULT_RUNS_DIR = ".artemis/runs"
@@ -50,6 +65,7 @@ class StepResult:
     ok: bool
     ms: int
     error: str | None = None
+    note: str | None = None
 
 
 @dataclass
@@ -76,6 +92,8 @@ class ScenarioResult:
             lines.append(f"  {mark} {step.index:>2}. {step.step} [{step.ms} ms]")
             if step.error:
                 lines.append("       " + step.error.split("\n", 1)[0])
+            if step.note:
+                lines.append("       note: " + step.note)
         lines += [f"  file: {a}" for a in self.artifacts]
         if self.screen:
             lines.append("  screen at failure:")
@@ -83,8 +101,28 @@ class ScenarioResult:
         return "\n".join(lines)
 
 
-def _as_list(value: Any) -> list[str]:
-    return [str(v) for v in value] if isinstance(value, list) else [str(value)]
+def _targets(value: Any) -> list[tuple[str, bool]]:
+    """``expect`` items as (text, exact): strings or {text, exact} mappings."""
+    items = value if isinstance(value, list) else [value]
+    return [
+        (str(item["text"]), bool(item.get("exact", False)))
+        if isinstance(item, dict)
+        else (str(item), False)
+        for item in items
+    ]
+
+
+ACTIONS = (
+    "launch",
+    "tap",
+    "long_press",
+    "input",
+    "hide_keyboard",
+    "scroll",
+    "key",
+    "back",
+    "open_link",
+)
 
 
 def _describe(step: dict[str, Any]) -> str:
@@ -97,11 +135,15 @@ class Runner:
         self.device = device or Device()
         stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
         self.run_dir = (runs_dir or Path(DEFAULT_RUNS_DIR)) / stamp
+        self._screen: Screen | None = None  # settled screen after the last action
+        self._before: tuple[str, Screen] | None = None  # last action, screen before it
+        self._note: str | None = None
 
     async def run_file(self, path: Path) -> ScenarioResult:
         data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
         result = ScenarioResult(name=str(data.get("name") or path.stem), path=str(path))
         app = data.get("app")
+        self._screen = self._before = None
         for index, step in enumerate(data.get("steps") or [], start=1):
             if not isinstance(step, dict) or len(step) != 1:
                 result.steps.append(
@@ -109,12 +151,13 @@ class Runner:
                 )
                 break
             started = time.perf_counter()
+            self._note = None
             try:
                 artifact = await self._step(step, app, path.stem)
                 if artifact:
                     result.artifacts.append(artifact)
                 ms = int((time.perf_counter() - started) * 1000)
-                result.steps.append(StepResult(index, _describe(step), True, ms))
+                result.steps.append(StepResult(index, _describe(step), True, ms, note=self._note))
             except (DeviceError, ValueError, KeyError, TypeError) as exc:
                 ms = int((time.perf_counter() - started) * 1000)
                 result.steps.append(StepResult(index, _describe(step), False, ms, str(exc)))
@@ -166,13 +209,14 @@ class Runner:
         elif kind == "hide_keyboard":
             await d.hide_keyboard()
         elif kind == "expect":
-            timeout = DEFAULT_EXPECT_TIMEOUT_MS
-            for text in _as_list(value):
-                await d.wait_for(text, timeout_ms=timeout)
+            targets = _targets(value)
+            for text, exact in targets:
+                await d.wait_for(text, timeout_ms=DEFAULT_EXPECT_TIMEOUT_MS, exact=exact)
+            self._note_stale(targets)
         elif kind == "expect_not":
             screen = await d.screen()
-            for text in _as_list(value):
-                if find_by_text(screen.elements, text) is not None:
+            for text, exact in _targets(value):
+                if find_node_by_text(screen.elements, text, exact=exact) is not None:
                     raise DeviceError(f"{text!r} is on screen but must not be:\n{screen.compact}")
         elif kind == "wait":
             spec = value if isinstance(value, dict) else {"text": value}
@@ -180,9 +224,16 @@ class Runner:
                 str(spec["text"]),
                 timeout_ms=int(spec.get("timeout_ms", 5000)),
                 gone=bool(spec.get("gone", False)),
+                exact=bool(spec.get("exact", False)),
             )
         elif kind == "scroll":
-            await d.scroll(str(value))
+            spec = value if isinstance(value, dict) else {"direction": value}
+            await d.scroll(
+                str(spec.get("direction", "down")),
+                within=spec.get("within"),
+                until=spec.get("until"),
+                max_swipes=int(spec.get("max_swipes", SCROLL_MAX_SWIPES)),
+            )
         elif kind == "key":
             await d.press_key(str(value))
         elif kind == "back":
@@ -198,19 +249,18 @@ class Runner:
             await asyncio.sleep(int(value) / 1000)
         else:
             raise ValueError(f"unknown step '{kind}'")
-        if kind in (
-            "launch",
-            "tap",
-            "long_press",
-            "input",
-            "hide_keyboard",
-            "scroll",
-            "key",
-            "back",
-            "open_link",
-        ):
-            await d.settled_screen()
+        if kind in ACTIONS:
+            before, self._screen = self._screen, await d.settled_screen()
+            self._before = (_describe(step), before) if before is not None else None
         return None
+
+    def _note_stale(self, targets: list[tuple[str, bool]]) -> None:
+        """Notes an expect that the screen before the last action already satisfied."""
+        if self._before is None:
+            return
+        action, screen = self._before
+        if all(find_node_by_text(screen.elements, t, exact=e) is not None for t, e in targets):
+            self._note = f"already on screen before '{action}': proves nothing about it"
 
 
 def collect(paths: list[str]) -> list[Path]:

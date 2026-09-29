@@ -20,7 +20,7 @@ from mcp.server.fastmcp import Context, FastMCP, Image
 
 from artemis.mcp import adb_server
 from wayup import profile as profiles
-from wayup.core import FIND_TIMEOUT_MS, Device, DeviceError
+from wayup.core import FIND_TIMEOUT_MS, SCROLL_MAX_SWIPES, Device, DeviceError
 from wayup.scenario import run_paths
 
 INSTRUCTIONS = """\
@@ -31,7 +31,10 @@ Android phone control over adb.
   to call get_ui_hierarchy after them. Screen lines are
   '[x,y] Class "label" flags'; [x,y] is the element center.
 - Prefer tap_text / input_into (by visible label or hint) over coordinates;
-  they wait up to 3 s for the element to appear.
+  they wait up to 3 s for the element to appear and tap its uncovered part
+  when a tab bar or the keyboard is drawn over it.
+- scroll 'within' an element's label scrolls that container (e.g. a chip
+  bar); 'until' swipes until an element can be tapped.
 - Close the keyboard with hide_keyboard, not with Back: it presses Back only
   while the keyboard is up.
 - Once a flow works, save it as a YAML scenario and replay it with run_scenario;
@@ -125,13 +128,17 @@ async def current_app(ctx: Context) -> str:
 
 
 @_tool()
-async def wait_for(ctx: Context, text: str, timeout_ms: int = 5000, gone: bool = False) -> str:
+async def wait_for(
+    ctx: Context, text: str, timeout_ms: int = 5000, gone: bool = False, exact: bool = False
+) -> str:
     """Waits until an element with this label appears ('gone': disappears).
 
-    Returns the screen at that moment, or an error with the last screen.
+    Labels match by substring unless 'exact'. Returns the screen at that moment,
+    or an error with the last screen.
     """
     try:
-        return (await device.wait_for(text, timeout_ms=timeout_ms, gone=gone)).compact
+        screen = await device.wait_for(text, timeout_ms=timeout_ms, gone=gone, exact=exact)
+        return screen.compact
     except DeviceError as exc:
         return f"Error: {exc}"
 
@@ -193,9 +200,25 @@ async def swipe(
 
 
 @_tool()
-async def scroll(ctx: Context, direction: str = "down", observe: bool = True) -> str:
-    """Scrolls the content: 'down' shows what is below; also up, left, right."""
-    return await _act(lambda: device.scroll(direction), observe)
+async def scroll(
+    ctx: Context,
+    direction: str = "down",
+    within: str | None = None,
+    until: str | None = None,
+    max_swipes: int = SCROLL_MAX_SWIPES,
+    observe: bool = True,
+) -> str:
+    """Scrolls the content: 'down' shows what is below; also up, left, right.
+
+    'within': swipe inside the scrollable container around the element with
+    this label (a horizontal chip bar, a list in a sheet) instead of the middle
+    of the screen. 'until': keep swiping until an element with this label can
+    be tapped; fails at the end of the content or after 'max_swipes'.
+    """
+    return await _act(
+        lambda: device.scroll(direction, within=within, until=until, max_swipes=max_swipes),
+        observe,
+    )
 
 
 @_tool()
@@ -333,7 +356,8 @@ async def run_scenario(ctx: Context, paths: list[str]) -> str:
     Paths are relative to the project directory. Failures include the screen
     and a screenshot path under .artemis/runs/. See wayup/scenario.py for the
     step format (launch, tap, input, hide_keyboard, expect, expect_not, wait,
-    scroll, key, back, open_link, screenshot, sleep_ms, stop).
+    scroll, key, back, open_link, screenshot, sleep_ms, stop). Steps can carry
+    a 'note', e.g. an expect that was already true before the last action.
     """
     missing = [p for p in paths if not Path(p).expanduser().exists()]
     if missing:
