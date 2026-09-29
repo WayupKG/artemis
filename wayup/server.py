@@ -35,6 +35,10 @@ Android phone control over adb.
   when a tab bar or the keyboard is drawn over it.
 - scroll 'within' an element's label scrolls that container (e.g. a chip
   bar); 'until' swipes until an element can be tapped.
+- Elements without text: by_id=true looks the text up as a resource-id
+  (a React Native testID); ids show in the screen as id=….
+- wait_for can require a state: selected, checked, enabled.
+- app_log shows the app's JS warnings and errors and crashes from logcat.
 - Close the keyboard with hide_keyboard, not with Back: it presses Back only
   while the keyboard is up.
 - Once a flow works, save it as a YAML scenario and replay it with run_scenario;
@@ -107,6 +111,23 @@ async def take_screenshot(ctx: Context, save_path: str | None = None) -> Image:
 
 
 @_tool()
+async def app_log(ctx: Context, seconds: int = 120, package: str | None = None) -> str:
+    """The app's warnings and errors from logcat for the last 'seconds'.
+
+    React Native JS warnings and errors, crashes and error lines of the app's
+    process; repeats are merged. 'package' defaults to the foreground app.
+    """
+    try:
+        package = package or device.foreground()
+        entries = await device.app_log(await device.log_mark(seconds), package)
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        return f"Error: {exc}"
+    if not entries:
+        return f"no warnings or errors from {package} in the last {seconds} s"
+    return "\n".join(map(str, entries))
+
+
+@_tool()
 async def current_app(ctx: Context) -> str:
     """Reports the foreground app, the active device and the project profile."""
     try:
@@ -129,15 +150,34 @@ async def current_app(ctx: Context) -> str:
 
 @_tool()
 async def wait_for(
-    ctx: Context, text: str, timeout_ms: int = 5000, gone: bool = False, exact: bool = False
+    ctx: Context,
+    text: str,
+    timeout_ms: int = 5000,
+    gone: bool = False,
+    exact: bool = False,
+    by_id: bool = False,
+    selected: bool | None = None,
+    checked: bool | None = None,
+    enabled: bool | None = None,
 ) -> str:
     """Waits until an element with this label appears ('gone': disappears).
 
-    Labels match by substring unless 'exact'. Returns the screen at that moment,
-    or an error with the last screen.
+    Labels match by substring unless 'exact'; 'by_id' matches the resource-id.
+    'selected' / 'checked' / 'enabled' also require that state, e.g. a selected
+    tab or a checked radio button. Returns the screen at that moment, or an
+    error with the last screen.
     """
+    flags = {"selected": selected, "checked": checked, "enabled": enabled}
+    state = {flag: value for flag, value in flags.items() if value is not None}
     try:
-        screen = await device.wait_for(text, timeout_ms=timeout_ms, gone=gone, exact=exact)
+        screen = await device.wait_for(
+            text,
+            timeout_ms=timeout_ms,
+            gone=gone,
+            exact=exact,
+            by_id=by_id,
+            state=state or None,
+        )
         return screen.compact
     except DeviceError as exc:
         return f"Error: {exc}"
@@ -168,14 +208,18 @@ async def tap_text(
     nth: int = 1,
     observe: bool = True,
     timeout_ms: int = FIND_TIMEOUT_MS,
+    by_id: bool = False,
 ) -> str:
     """Taps the element whose label or hint matches 'text' (case-insensitive).
 
     Exact matches win over substrings, buttons over plain text; 'nth' picks the
-    n-th of equal matches, from 1. Waits up to 'timeout_ms' for the element to
-    appear. Returns the settled screen.
+    n-th of equal matches, from 1. 'by_id' takes 'text' as a resource-id, for
+    elements without text. Waits up to 'timeout_ms' for the element to appear.
+    Returns the settled screen.
     """
-    return await _act(lambda: device.tap_text(text, nth=nth, timeout_ms=timeout_ms), observe)
+    return await _act(
+        lambda: device.tap_text(text, nth=nth, timeout_ms=timeout_ms, by_id=by_id), observe
+    )
 
 
 @_tool()
@@ -274,15 +318,20 @@ async def focus_and_input_text(
 
 @_tool()
 async def input_into(
-    ctx: Context, field: str, text: str, clear: bool = True, observe: bool = True
+    ctx: Context,
+    field: str,
+    text: str,
+    clear: bool = True,
+    observe: bool = True,
+    by_id: bool = False,
 ) -> str:
     """Types 'text' into the input whose label or hint matches 'field'.
 
-    Replaces the content unless 'clear' is false; waits up to 3 s for the field
-    to appear. The keyboard stays open: close it with hide_keyboard. Returns the
-    settled screen.
+    Replaces the content unless 'clear' is false; 'by_id' finds the field by
+    resource-id. Waits up to 3 s for the field to appear. The keyboard stays
+    open: close it with hide_keyboard. Returns the settled screen.
     """
-    return await _act(lambda: device.input_into(field, text, clear=clear), observe)
+    return await _act(lambda: device.input_into(field, text, clear=clear, by_id=by_id), observe)
 
 
 @_tool()
@@ -357,7 +406,8 @@ async def run_scenario(ctx: Context, paths: list[str]) -> str:
     and a screenshot path under .artemis/runs/. See wayup/scenario.py for the
     step format (launch, tap, input, hide_keyboard, expect, expect_not, wait,
     scroll, key, back, open_link, screenshot, sleep_ms, stop). Steps can carry
-    a 'note', e.g. an expect that was already true before the last action.
+    a 'note', e.g. an expect that was already true before the last action;
+    each scenario lists the app's logcat warnings and errors.
     """
     missing = [p for p in paths if not Path(p).expanduser().exists()]
     if missing:

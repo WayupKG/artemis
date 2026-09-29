@@ -10,10 +10,13 @@ A scenario is a list of steps; each step is a one-key mapping::
       - tap: Overdue                  # by label/hint, waits up to 3 s for it;
                                       # {text, nth, timeout_ms} or [x, y]; taps
                                       # the uncovered part if a bar overlaps it
-      - expect: "Overdue, 7"          # waits up to 3 s; string or list; an item
-                                      # can be {text, exact: true}
+      - tap: {id: close-button}       # by resource-id (React Native testID)
+      - expect: "Overdue, 7"          # waits up to 3 s; string or list
+      - expect: {text: Overdue, exact: true, selected: true}
+                                      # item keys: text or id, exact, and state:
+                                      # selected, checked, enabled, focused
       - expect_not: Error
-      - input: {field: Search tasks…, text: Standup, clear: true}
+      - input: {field: Search tasks…, text: Standup, clear: true}   # or {id: …}
       - hide_keyboard: true           # Back only if the keyboard is up
       - wait: {text: TASK-1, timeout_ms: 5000, gone: false, exact: false}
       - scroll: down                  # down | up | left | right
@@ -30,6 +33,10 @@ A scenario is a list of steps; each step is a one-key mapping::
 
 An ``expect`` whose texts were all on screen already before the last action
 passes without proving that the action worked; the report notes it.
+
+The report also lists the app's logcat warnings and errors during the
+scenario (JS console, crashes; other error lines are only counted), and
+saves them all to ``<scenario>-logcat.txt`` in the run directory.
 
 Usage: ``python -m wayup.scenario path/to/file.yaml [more.yaml | dir ...]``.
 """
@@ -48,14 +55,18 @@ import yaml
 from wayup.core import (
     FIND_TIMEOUT_MS,
     SCROLL_MAX_SWIPES,
+    STATE_FLAGS,
     Device,
     DeviceError,
+    LogEntry,
     Screen,
     find_node_by_text,
 )
 
 DEFAULT_EXPECT_TIMEOUT_MS = 3000
 DEFAULT_RUNS_DIR = ".artemis/runs"
+LOG_REPORT_LINES = 10
+LOG_REPORT_WIDTH = 200
 
 
 @dataclass
@@ -75,6 +86,7 @@ class ScenarioResult:
     steps: list[StepResult] = field(default_factory=list)
     screen: str | None = None
     artifacts: list[str] = field(default_factory=list)
+    log: list[LogEntry] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -94,6 +106,8 @@ class ScenarioResult:
                 lines.append("       " + step.error.split("\n", 1)[0])
             if step.note:
                 lines.append("       note: " + step.note)
+        if self.log:
+            lines += _log_summary(self.log)
         lines += [f"  file: {a}" for a in self.artifacts]
         if self.screen:
             lines.append("  screen at failure:")
@@ -101,15 +115,34 @@ class ScenarioResult:
         return "\n".join(lines)
 
 
-def _targets(value: Any) -> list[tuple[str, bool]]:
-    """``expect`` items as (text, exact): strings or {text, exact} mappings."""
-    items = value if isinstance(value, list) else [value]
-    return [
-        (str(item["text"]), bool(item.get("exact", False)))
-        if isinstance(item, dict)
-        else (str(item), False)
-        for item in items
-    ]
+@dataclass(frozen=True)
+class Target:
+    """What a step looks for: a label (or resource-id) and the state it must be in."""
+
+    text: str
+    exact: bool = False
+    by_id: bool = False
+    state: tuple[tuple[str, bool], ...] = ()
+
+    def kwargs(self) -> dict[str, Any]:
+        return {"exact": self.exact, "by_id": self.by_id, "state": dict(self.state) or None}
+
+
+def _target(item: Any, key: str = "text") -> Target:
+    """A string, or a mapping with ``key`` or ``id``, ``exact`` and state flags."""
+    if not isinstance(item, dict):
+        return Target(str(item))
+    by_id = "id" in item
+    return Target(
+        str(item["id"] if by_id else item[key]),
+        exact=bool(item.get("exact", False)),
+        by_id=by_id,
+        state=tuple((flag, bool(item[flag])) for flag in STATE_FLAGS if flag in item),
+    )
+
+
+def _targets(value: Any) -> list[Target]:
+    return [_target(item) for item in (value if isinstance(value, list) else [value])]
 
 
 ACTIONS = (
@@ -123,6 +156,31 @@ ACTIONS = (
     "back",
     "open_link",
 )
+
+
+def _log_summary(log: list[LogEntry]) -> list[str]:
+    """Counts by kind and the JS, React Native native and crash lines, all without
+    stack frames; other app errors are only counted (everything is in the log file)."""
+
+    log = [e for e in log if not e.message.lstrip().startswith(("at ", "..."))]
+
+    def count(kind: str, *levels: str) -> int:
+        return sum(e.count for e in log if e.kind == kind and e.level in levels)
+
+    lines = [
+        f"  logcat: JS {count('js', 'E', 'F')} errors, {count('js', 'W')} warnings; "
+        f"native {count('native', 'E', 'F')}; crash {count('crash', 'E', 'F')}; "
+        f"other app errors {count('app', 'E', 'F')}"
+    ]
+    shown = [e for e in log if e.kind in ("js", "native", "crash")]
+    for entry in shown[:LOG_REPORT_LINES]:
+        text = str(entry)
+        lines.append(
+            "    " + (text if len(text) <= LOG_REPORT_WIDTH else text[: LOG_REPORT_WIDTH - 1] + "…")
+        )
+    if len(shown) > LOG_REPORT_LINES:
+        lines.append(f"    … {len(shown) - LOG_REPORT_LINES} more")
+    return lines
 
 
 def _describe(step: dict[str, Any]) -> str:
@@ -144,6 +202,7 @@ class Runner:
         result = ScenarioResult(name=str(data.get("name") or path.stem), path=str(path))
         app = data.get("app")
         self._screen = self._before = None
+        mark = await self._log_mark()
         for index, step in enumerate(data.get("steps") or [], start=1):
             if not isinstance(step, dict) or len(step) != 1:
                 result.steps.append(
@@ -163,7 +222,31 @@ class Runner:
                 result.steps.append(StepResult(index, _describe(step), False, ms, str(exc)))
                 await self._capture_failure(result, path.stem, index)
                 break
+        await self._collect_log(result, app, mark, path.stem)
         return result
+
+    async def _log_mark(self) -> str | None:
+        try:
+            return await self.device.log_mark()
+        except Exception:  # pylint: disable=broad-exception-caught
+            return None
+
+    async def _collect_log(
+        self, result: ScenarioResult, app: str | None, mark: str | None, stem: str
+    ) -> None:
+        """Adds the app's warnings and errors to the result and saves them all to a file."""
+        if mark is None:
+            return
+        try:
+            result.log = await self.device.app_log(mark, app)
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            result.artifacts.append(f"(logcat failed: {exc})")
+            return
+        if result.log:
+            target = self.run_dir / f"{stem}-logcat.txt"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("\n".join(map(str, result.log)) + "\n", encoding="utf-8")
+            result.artifacts.append(str(target))
 
     async def _capture_failure(self, result: ScenarioResult, stem: str, index: int) -> None:
         try:
@@ -193,38 +276,49 @@ class Runner:
                 x, y = int(value[0]), int(value[1])
             else:
                 spec = value if isinstance(value, dict) else {"text": value}
+                target = _target(spec)
                 x, y = await d.find(
-                    str(spec["text"]),
+                    target.text,
                     nth=int(spec.get("nth", 1)),
                     timeout_ms=int(spec.get("timeout_ms", FIND_TIMEOUT_MS)),
+                    by_id=target.by_id,
                 )
             if kind == "tap":
                 await d.tap(x, y)
             else:
                 await d.long_press(x, y)
         elif kind == "input":
+            target = _target(value, key="field")
             await d.input_into(
-                str(value["field"]), str(value["text"]), bool(value.get("clear", True))
+                target.text,
+                str(value["text"]),
+                bool(value.get("clear", True)),
+                by_id=target.by_id,
             )
         elif kind == "hide_keyboard":
             await d.hide_keyboard()
         elif kind == "expect":
             targets = _targets(value)
-            for text, exact in targets:
-                await d.wait_for(text, timeout_ms=DEFAULT_EXPECT_TIMEOUT_MS, exact=exact)
+            for target in targets:
+                await d.wait_for(
+                    target.text, timeout_ms=DEFAULT_EXPECT_TIMEOUT_MS, **target.kwargs()
+                )
             self._note_stale(targets)
         elif kind == "expect_not":
             screen = await d.screen()
-            for text, exact in _targets(value):
-                if find_node_by_text(screen.elements, text, exact=exact) is not None:
-                    raise DeviceError(f"{text!r} is on screen but must not be:\n{screen.compact}")
+            for target in _targets(value):
+                if find_node_by_text(screen.elements, target.text, **target.kwargs()) is not None:
+                    raise DeviceError(
+                        f"{target.text!r} is on screen but must not be:\n{screen.compact}"
+                    )
         elif kind == "wait":
             spec = value if isinstance(value, dict) else {"text": value}
+            target = _target(spec)
             await d.wait_for(
-                str(spec["text"]),
+                target.text,
                 timeout_ms=int(spec.get("timeout_ms", 5000)),
                 gone=bool(spec.get("gone", False)),
-                exact=bool(spec.get("exact", False)),
+                **target.kwargs(),
             )
         elif kind == "scroll":
             spec = value if isinstance(value, dict) else {"direction": value}
@@ -254,12 +348,14 @@ class Runner:
             self._before = (_describe(step), before) if before is not None else None
         return None
 
-    def _note_stale(self, targets: list[tuple[str, bool]]) -> None:
+    def _note_stale(self, targets: list[Target]) -> None:
         """Notes an expect that the screen before the last action already satisfied."""
         if self._before is None:
             return
         action, screen = self._before
-        if all(find_node_by_text(screen.elements, t, exact=e) is not None for t, e in targets):
+        if all(
+            find_node_by_text(screen.elements, t.text, **t.kwargs()) is not None for t in targets
+        ):
             self._note = f"already on screen before '{action}': proves nothing about it"
 
 

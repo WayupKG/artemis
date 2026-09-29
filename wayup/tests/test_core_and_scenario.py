@@ -1,6 +1,7 @@
 """Text lookup and the YAML scenario runner, against a fake device."""
 
 import asyncio
+from pathlib import Path
 
 import pytest
 
@@ -8,12 +9,16 @@ from wayup import core
 from wayup.core import (
     Device,
     DeviceError,
+    LogEntry,
     Screen,
     annotate_subtrees,
+    filter_app_log,
     find_by_text,
     find_element_at,
+    find_node_by_text,
     locate,
 )
+from wayup.profile import compact_hierarchy
 from wayup.scenario import Runner
 
 
@@ -68,6 +73,56 @@ def test_field_lookup_matches_hint_of_inputs_only():
 def test_exact_skips_substring_matches():
     assert find_by_text(HOME, "Overdue:", exact=True) is None
     assert find_by_text(HOME, "overdue: 7", exact=True) == (300, 200)
+
+
+CHIPS = [
+    _node(
+        cls="android.view.View",
+        bounds=(0, 0, 300, 100),
+        clickable="true",
+        selected="false",
+        **{"content-desc": "Today, 1"},
+    ),
+    _node(
+        cls="android.view.View",
+        bounds=(300, 0, 600, 100),
+        clickable="true",
+        selected="true",
+        **{"content-desc": "Overdue, 7"},
+    ),
+    _node(
+        cls="android.view.ViewGroup",
+        bounds=(900, 0, 1000, 100),
+        clickable="true",
+        **{"resource-id": "close-button"},
+    ),
+    _node("Title", bounds=(0, 200, 600, 300), **{"resource-id": "com.example:id/title"}),
+]
+
+
+def test_id_lookup_matches_the_whole_id_or_the_part_after_id():
+    assert find_by_text(CHIPS, "close-button", by_id=True) == (950, 50)
+    assert find_by_text(CHIPS, "title", by_id=True) == (300, 250)
+    assert find_by_text(CHIPS, "com.example:id/title", by_id=True) == (300, 250)
+    assert find_by_text(CHIPS, "Title", by_id=True) is None
+
+
+def test_state_keeps_only_elements_with_these_flags():
+    assert find_node_by_text(CHIPS, "Overdue", state={"selected": True}) == 1
+    assert find_node_by_text(CHIPS, "Today", state={"selected": True}) is None
+    assert find_node_by_text(CHIPS, "Today", state={"selected": False}) == 0
+
+
+def test_compact_screen_shows_ids_and_unlabeled_test_ids():
+    marker = _node(bounds=(0, 400, 100, 500), **{"resource-id": "empty-state"})
+    native = _node(bounds=(0, 600, 100, 700), **{"resource-id": "com.example:id/frame"})
+
+    lines = compact_hierarchy(CHIPS + [marker, native]).splitlines()
+
+    assert "[950,50] ViewGroup id=close-button tap" in lines
+    assert '[300,250] TextView "Title" id=title' in lines
+    assert "[50,450] TextView id=empty-state" in lines
+    assert not any("id=frame" in line for line in lines)
 
 
 def test_nth_picks_among_equal_matches():
@@ -139,6 +194,41 @@ def test_find_gives_up_with_the_last_screen(fast):
 
     with pytest.raises(DeviceError, match="'Reset' on screen after 0 ms"):
         asyncio.run(device.find("Reset", timeout_ms=0))
+
+
+def test_wait_names_the_missing_state(fast):
+    device = ScriptedDevice([CHIPS])
+
+    with pytest.raises(DeviceError, match="'Today' is on screen, but not selected after 0 ms"):
+        asyncio.run(device.wait_for("Today", timeout_ms=0, state={"selected": True}))
+
+
+LOGCAT = [
+    "09-30 00:42:46.284  7966  8099 W unknown:ViewManagerPropertyUpdater: Could not find setter",
+    "09-30 00:42:47.292  7966  8099 W ReactNativeJS: statusBarTranslucent values are ignored",
+    "09-30 00:42:48.000  7966  8099 E ReactNativeJS: TypeError: undefined is not a function",
+    "09-30 00:42:49.000  7966  8120 E OkHttp: request failed",
+    "09-30 00:42:49.100  7966  8099 E unknown:UIManagerHelper: Unhandled SoftException",
+    "09-30 00:42:49.500  7966  8099 I ReactNativeJS: console.log output",
+    "09-30 00:42:50.000   900   901 E SurfaceFlinger: unrelated",
+    "09-30 00:42:51.000  8100  8100 E AndroidRuntime: FATAL EXCEPTION: main",
+    "09-30 00:42:51.001  8100  8100 E AndroidRuntime: Process: kg.replai.revision, PID: 8100",
+    "09-30 00:42:52.292  8200  8201 W ReactNativeJS: statusBarTranslucent values are ignored",
+    "--------- beginning of crash",
+]
+
+
+def test_app_log_keeps_js_warnings_errors_and_app_crashes():
+    entries = filter_app_log(LOGCAT, "kg.replai.revision")
+
+    assert [(str(e), e.kind) for e in entries] == [
+        ("W ReactNativeJS: statusBarTranslucent values are ignored (x2)", "js"),
+        ("E ReactNativeJS: TypeError: undefined is not a function", "js"),
+        ("E OkHttp: request failed", "app"),
+        ("E unknown:UIManagerHelper: Unhandled SoftException", "native"),
+        ("E AndroidRuntime: FATAL EXCEPTION: main", "crash"),
+        ("E AndroidRuntime: Process: kg.replai.revision, PID: 8100", "crash"),
+    ]
 
 
 def test_app_is_ready_once_its_own_screen_is_still(fast):
@@ -278,9 +368,10 @@ def test_scroll_until_fails_at_the_end_of_the_content(fast):
 class FakeDevice:
     """Records actions; the screen is whatever the test sets."""
 
-    def __init__(self, elements):
+    def __init__(self, elements, log=None):
         self.elements = elements
         self.actions = []
+        self.log = log or []
 
     async def screen(self, show_keyboard=False):
         return Screen("kg.replai.revision", self.elements, "app: kg.replai.revision")
@@ -288,9 +379,9 @@ class FakeDevice:
     async def settled_screen(self):
         return await self.screen()
 
-    async def find(self, text, nth=1, field=False, timeout_ms=core.FIND_TIMEOUT_MS):
-        self.actions.append(("find", text, timeout_ms))
-        match = find_by_text(self.elements, text, nth=nth, field=field)
+    async def find(self, text, nth=1, field=False, timeout_ms=core.FIND_TIMEOUT_MS, by_id=False):
+        self.actions.append(("find", text, timeout_ms) + (("id",) if by_id else ()))
+        match = find_by_text(self.elements, text, nth=nth, field=field, by_id=by_id)
         if match is None:
             raise DeviceError(f"no element matching {text!r}")
         return match
@@ -305,11 +396,14 @@ class FakeDevice:
     async def tap(self, x, y):
         self.actions.append(("tap", x, y))
 
-    async def input_into(self, field, text, clear=True):
-        self.actions.append(("input", field, text, clear))
+    async def input_into(self, field, text, clear=True, by_id=False):
+        self.actions.append(("input", field, text, clear) + (("id",) if by_id else ()))
 
-    async def wait_for(self, text, timeout_ms=5000, gone=False, exact=False):
-        if (find_by_text(self.elements, text, exact=exact) is None) != gone:
+    async def wait_for(
+        self, text, timeout_ms=5000, gone=False, exact=False, by_id=False, state=None
+    ):
+        index = find_node_by_text(self.elements, text, exact=exact, by_id=by_id, state=state)
+        if (index is None) != gone:
             raise DeviceError(f"{text!r} not on screen")
         return await self.screen()
 
@@ -321,6 +415,13 @@ class FakeDevice:
 
     async def screenshot_png(self):
         return b"png"
+
+    async def log_mark(self):
+        return "100.000"
+
+    async def app_log(self, since, package=None):
+        self.actions.append(("app_log", since, package))
+        return self.log
 
 
 def _run(tmp_path, yaml_text, device):
@@ -355,6 +456,7 @@ steps:
         ("tap", 155, 250),
         ("input", "Search tasks…", "Standup", True),
         ("back",),
+        ("app_log", "100.000", "kg.replai.revision"),
     ]
 
 
@@ -371,7 +473,7 @@ steps:
     )
 
     assert result.ok, result.report()
-    assert device.actions == [("find", "Done", 8000), ("tap", 400, 850), ("hide_keyboard",)]
+    assert device.actions[:3] == [("find", "Done", 8000), ("tap", 400, 850), ("hide_keyboard",)]
 
 
 def test_scenario_stops_at_first_failure_and_saves_screenshot(tmp_path):
@@ -390,7 +492,7 @@ steps:
     assert [s.ok for s in result.steps] == [False]
     assert result.screen == "app: kg.replai.revision"
     assert any(a.endswith("flow-step1-fail.png") for a in result.artifacts)
-    assert device.actions == []
+    assert [a for a in device.actions if a[0] != "app_log"] == []
 
 
 @pytest.mark.parametrize("step", ["- frobnicate: 1", "- {tap: a, back: true}", "- launch: true"])
@@ -415,7 +517,7 @@ steps:
     )
 
     assert result.ok, result.report()
-    assert device.actions == [
+    assert device.actions[:2] == [
         ("scroll", "down", None, None, 10),
         ("scroll", "left", "Overdue tasks", "Done", 3),
     ]
@@ -456,3 +558,55 @@ def test_scroll_until_keeps_the_container_when_its_anchor_scrolls_away(fast):
     asyncio.run(device.scroll("left", within="Today, 1", until="Reset"))
 
     assert swipes == [(200, 150, 800, 150)] * 2
+
+
+def test_scenario_targets_by_id_and_state(tmp_path):
+    device = FakeDevice(CHIPS)
+    result = _run(
+        tmp_path,
+        """
+steps:
+  - tap: {id: close-button}
+  - input: {id: title, text: Hello}
+  - expect: {text: Overdue, selected: true}
+  - expect_not: {text: Today, selected: true}
+  - wait: {id: close-button, enabled: true}
+""",
+        device,
+    )
+
+    assert result.ok, result.report()
+    assert device.actions[:3] == [
+        ("find", "close-button", 3000, "id"),
+        ("tap", 950, 50),
+        ("input", "title", "Hello", True, "id"),
+    ]
+
+
+def test_scenario_fails_when_the_element_is_in_another_state(tmp_path):
+    result = _run(
+        tmp_path, "steps:\n  - expect: {text: Today, selected: true}\n", FakeDevice(CHIPS)
+    )
+
+    assert not result.ok
+
+
+def test_report_shows_js_and_crashes_and_saves_the_whole_app_log(tmp_path):
+    log = [
+        LogEntry("W", "ReactNativeJS", "edge-to-edge", "js", 2),
+        LogEntry("E", "ashmem", "vendor noise"),
+        LogEntry("E", "unknown:UIManagerHelper", "Unhandled SoftException", "native"),
+        LogEntry("E", "unknown:UIManagerHelper", "\tat com.facebook.react.Foo(Foo.kt:1)", "native"),
+        LogEntry("E", "AndroidRuntime", "FATAL EXCEPTION: main", "crash"),
+    ]
+    result = _run(tmp_path, "steps:\n  - back: true\n", FakeDevice(HOME, log=log))
+
+    report = result.report()
+    assert "logcat: JS 0 errors, 2 warnings; native 1; crash 1; other app errors 1" in report
+    assert "    W ReactNativeJS: edge-to-edge (x2)" in report
+    assert "    E unknown:UIManagerHelper: Unhandled SoftException" in report
+    assert "    E AndroidRuntime: FATAL EXCEPTION: main" in report
+    assert "vendor noise" not in report
+    assert "Foo.kt" not in report
+    saved = [a for a in result.artifacts if a.endswith("flow-logcat.txt")]
+    assert saved and "E ashmem: vendor noise" in Path(saved[0]).read_text(encoding="utf-8")

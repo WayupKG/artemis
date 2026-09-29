@@ -148,6 +148,11 @@ def _label(node: dict[str, Any]) -> str:
     return text
 
 
+def short_id(node: dict[str, Any]) -> str:
+    """resource-id without the ``package:id/`` prefix; a React Native testID as is."""
+    return str(node.get("resource-id") or "").split(":id/", 1)[-1]
+
+
 def _flags(node: dict[str, Any], is_input: bool) -> list[str]:
     flags = []
     if node.get("clickable") == "true":
@@ -177,10 +182,11 @@ def compact_hierarchy(
     show_system_ui: bool = False,
     hidden_packages: set[str] | None = None,
 ) -> str:
-    """One line per meaningful element: ``[x,y] Class "label" hint=… flags``.
+    """One line per meaningful element: ``[x,y] Class "label" hint=… id=… flags``.
 
     Text nodes that only repeat the label of an enclosing interactive element are
-    dropped, as are status-bar nodes and unlabeled static containers.
+    dropped, as are status-bar nodes and unlabeled static containers, unless
+    they carry a React Native testID (a resource-id without ``:id/``).
     """
     lines = [f"app: {foreground or 'unknown'}"]
     interactive: list[tuple[dict[str, Any], str]] = []
@@ -204,7 +210,9 @@ def compact_hierarchy(
         )
         label = _label(node)
         hint = " ".join(str(node.get("hint") or "").split())
-        if not label and not acts:
+        rid = short_id(node)
+        test_id = bool(rid) and ":id/" not in str(node.get("resource-id"))
+        if not label and not acts and not test_id:
             continue
         if not acts and any(
             label in parent_label and _contains(parent, center)
@@ -218,6 +226,8 @@ def compact_hierarchy(
             line += f' "{label}"'
         if hint and hint != label:
             line += f' hint="{hint}"'
+        if rid:
+            line += f" id={rid}"
         flags = _flags(node, is_input)
         if flags:
             line += " " + " ".join(flags)

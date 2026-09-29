@@ -11,6 +11,7 @@ from dataclasses import dataclass
 import io
 import logging
 import os
+import re
 import time
 from typing import Any
 import xml.etree.ElementTree as ET
@@ -49,6 +50,29 @@ TAP_GRID = 9
 # In-app views bigger than this share of the screen do not count as covering:
 # they are usually pass-through hosts for overlays, not the overlays themselves.
 OVERLAY_MAX_SCREEN_SHARE = 0.9
+
+# Element state that expect/wait can require: {"selected": True, ...}.
+STATE_FLAGS = ("selected", "checked", "enabled", "focused")
+
+# logcat -v threadtime: date time pid tid level tag: message
+LOG_LINE = re.compile(
+    r"^\d\d-\d\d \d\d:\d\d:\d\d\.\d+\s+(\d+)\s+\d+\s+([VDIWEF])\s+(.+?)\s*: (.*)$"
+)
+
+
+@dataclass
+class LogEntry:
+    level: str
+    tag: str
+    message: str
+    # "js" (JS console), "native" (React Native Java/C++), "crash" (AndroidRuntime)
+    # or "app" (other error lines of the process, often vendor noise)
+    kind: str = "app"
+    count: int = 1
+
+    def __str__(self) -> str:
+        repeat = f" (x{self.count})" if self.count > 1 else ""
+        return f"{self.level} {self.tag}: {self.message}{repeat}"
 
 
 class DeviceError(Exception):
@@ -344,6 +368,19 @@ class Device:
         if not await self.guard().erase_text(nb_chars=1):
             raise DeviceError("erase failed")
 
+    async def log_mark(self, seconds_ago: int = 0) -> str:
+        """Device clock in the form ``logcat -T`` takes, to read the log since then."""
+        now = await asyncio.to_thread(self._shell, "date +%s")
+        return f"{int(now.strip()) - seconds_ago}.000"
+
+    async def app_log(self, since: str, package: str | None = None) -> list[LogEntry]:
+        """Warnings and errors the app logged since ``since`` (see filter_app_log)."""
+        raw = await asyncio.to_thread(self._shell, f"logcat -d -v threadtime -T {since}")
+        pids: set[str] = set()
+        if package:
+            pids.update((await asyncio.to_thread(self._shell, f"pidof {package}")).split())
+        return filter_app_log(raw.splitlines(), package, pids)
+
     async def keyboard_shown(self) -> bool:
         output = await asyncio.to_thread(self._shell, "dumpsys input_method | grep mInputShown")
         return "mInputShown=true" in output
@@ -366,7 +403,12 @@ class Device:
     # ------------------------------------------------------------------ by text
 
     async def find(
-        self, text: str, nth: int = 1, field: bool = False, timeout_ms: int = FIND_TIMEOUT_MS
+        self,
+        text: str,
+        nth: int = 1,
+        field: bool = False,
+        timeout_ms: int = FIND_TIMEOUT_MS,
+        by_id: bool = False,
     ) -> tuple[int, int]:
         """Point to tap on the matching element, waiting up to ``timeout_ms`` for it.
 
@@ -375,54 +417,76 @@ class Device:
         A match on the first read is returned at once. One that shows up later
         means the screen is still changing, so it is returned only when two reads
         in a row agree on the point: a sheet sliding in is not tapped mid-way.
+        ``by_id`` looks ``text`` up as a resource-id (a React Native testID).
         """
         deadline = time.monotonic() + timeout_ms / 1000
         screen = await self.screen()
-        point, cover = locate(screen.elements, text, nth=nth, field=field)
+        point, cover = locate(screen.elements, text, nth=nth, field=field, by_id=by_id)
         if point is not None:
             return point
         while time.monotonic() < deadline:
             await asyncio.sleep(FIND_POLL_S)
             screen = await self.screen()
             previous = point
-            point, cover = locate(screen.elements, text, nth=nth, field=field)
+            point, cover = locate(screen.elements, text, nth=nth, field=field, by_id=by_id)
             if point is not None and point == previous:
                 return point
         if point is not None:
             return point
+        what = _what(text, by_id)
         if cover is not None:
             raise DeviceError(
-                f"{text!r} is covered by {cover}; scroll it into view or close what covers it:\n"
+                f"{what} is covered by {cover}; scroll it into view or close what covers it:\n"
                 f"{screen.compact}"
             )
-        raise DeviceError(
-            f"no element matching {text!r} on screen after {timeout_ms} ms:\n{screen.compact}"
-        )
+        raise DeviceError(f"no {what} on screen after {timeout_ms} ms:\n{screen.compact}")
 
-    async def tap_text(self, text: str, nth: int = 1, timeout_ms: int = FIND_TIMEOUT_MS) -> None:
-        x, y = await self.find(text, nth=nth, timeout_ms=timeout_ms)
+    async def tap_text(
+        self, text: str, nth: int = 1, timeout_ms: int = FIND_TIMEOUT_MS, by_id: bool = False
+    ) -> None:
+        x, y = await self.find(text, nth=nth, timeout_ms=timeout_ms, by_id=by_id)
         await self.tap(x, y)
 
     async def input_into(
-        self, field: str, text: str, clear: bool = True, timeout_ms: int = FIND_TIMEOUT_MS
+        self,
+        field: str,
+        text: str,
+        clear: bool = True,
+        timeout_ms: int = FIND_TIMEOUT_MS,
+        by_id: bool = False,
     ) -> None:
-        x, y = await self.find(field, field=True, timeout_ms=timeout_ms)
+        x, y = await self.find(field, field=True, timeout_ms=timeout_ms, by_id=by_id)
         await self.input_text(x, y, text, clear=clear)
 
     async def wait_for(
-        self, text: str, timeout_ms: int = 5000, gone: bool = False, exact: bool = False
+        self,
+        text: str,
+        timeout_ms: int = 5000,
+        gone: bool = False,
+        exact: bool = False,
+        by_id: bool = False,
+        state: dict[str, bool] | None = None,
     ) -> Screen:
+        """Waits for an element (in ``state``, e.g. {"selected": True}) to appear or go."""
         deadline = time.monotonic() + timeout_ms / 1000
         while True:
             screen = await self.screen()
-            present = find_node_by_text(screen.elements, text, exact=exact) is not None
-            if present != gone:
+            index = find_node_by_text(screen.elements, text, exact=exact, by_id=by_id, state=state)
+            if (index is not None) != gone:
                 return screen
             if time.monotonic() >= deadline:
-                state = "still on" if gone else "not on"
-                raise DeviceError(
-                    f"{text!r} {state} screen after {timeout_ms} ms:\n{screen.compact}"
-                )
+                what = _what(text, by_id)
+                if gone:
+                    problem = f"{what} still on screen"
+                elif (
+                    state
+                    and find_node_by_text(screen.elements, text, exact=exact, by_id=by_id)
+                    is not None
+                ):
+                    problem = f"{what} is on screen, but not {describe_state(state)}"
+                else:
+                    problem = f"{what} not on screen"
+                raise DeviceError(f"{problem} after {timeout_ms} ms:\n{screen.compact}")
             await asyncio.sleep(0.15)
 
 
@@ -561,11 +625,71 @@ def visible_point(elements: list[dict[str, Any]], index: int) -> tuple[int, int]
     return None
 
 
+def _what(text: str, by_id: bool) -> str:
+    return f"element with id {text!r}" if by_id else f"element matching {text!r}"
+
+
+def _flag(node: dict[str, Any], flag: str) -> bool:
+    """A state flag of the element; a missing 'enabled' means enabled."""
+    value = node.get(flag)
+    return flag == "enabled" if value is None else value == "true"
+
+
+def describe_state(state: dict[str, bool]) -> str:
+    return ", ".join(flag if wanted else f"not {flag}" for flag, wanted in state.items())
+
+
+def filter_app_log(
+    lines: list[str], package: str | None = None, pids: set[str] | None = None
+) -> list[LogEntry]:
+    """The app's warnings and errors from ``logcat -v threadtime`` lines.
+
+    Kept: React Native JS warnings and errors (tag ReactNativeJS, kind "js"),
+    and error or fatal lines of the app's processes - the given pids, the pids
+    that logged JS, and a crashed process that AndroidRuntime names as
+    ``package``: React Native native errors (tags ``unknown:*`` and
+    ``ReactNative*``, kind "native"), crash reports (AndroidRuntime, kind
+    "crash") and the rest (kind "app", often vendor noise). Repeats are merged
+    with a count, in order of first appearance.
+    """
+    parsed = [match.groups() for match in map(LOG_LINE.match, lines) if match]
+    app_pids = set(pids or ())
+    for pid, _level, tag, message in parsed:
+        if tag == "ReactNativeJS" or (
+            tag == "AndroidRuntime" and package and message.startswith(f"Process: {package}")
+        ):
+            app_pids.add(pid)
+    entries: dict[tuple[str, str, str], LogEntry] = {}
+    for pid, level, tag, message in parsed:
+        js = tag == "ReactNativeJS" and level in ("W", "E", "F")
+        if not js and not (pid in app_pids and level in ("E", "F")):
+            continue
+        key = (level, tag, message)
+        if key in entries:
+            entries[key].count += 1
+        else:
+            kind = "js" if js else _log_kind(tag)
+            entries[key] = LogEntry(level, tag, message, kind)
+    return list(entries.values())
+
+
+def _log_kind(tag: str) -> str:
+    if tag == "AndroidRuntime":
+        return "crash"
+    if tag.startswith(("unknown:", "ReactNative")):
+        return "native"
+    return "app"
+
+
 def locate(
-    elements: list[dict[str, Any]], text: str, nth: int = 1, field: bool = False
+    elements: list[dict[str, Any]],
+    text: str,
+    nth: int = 1,
+    field: bool = False,
+    by_id: bool = False,
 ) -> tuple[tuple[int, int] | None, str | None]:
     """Tap point for the matching element, or None and what covers it (None if absent)."""
-    index = find_node_by_text(elements, text, nth=nth, field=field)
+    index = find_node_by_text(elements, text, nth=nth, field=field, by_id=by_id)
     if index is None:
         return None, None
     point = visible_point(elements, index)
@@ -577,6 +701,7 @@ def locate(
 
 
 def _tappable(elements: list[dict[str, Any]], text: str) -> bool:
+    """An element with this label is on screen and not fully covered."""
     index = find_node_by_text(elements, text)
     return index is not None and visible_point(elements, index) is not None
 
@@ -587,9 +712,10 @@ def find_by_text(
     nth: int = 1,
     field: bool = False,
     exact: bool = False,
+    by_id: bool = False,
 ) -> tuple[int, int] | None:
     """Center of the element whose label or hint matches ``text`` (see find_node_by_text)."""
-    index = find_node_by_text(elements, text, nth=nth, field=field, exact=exact)
+    index = find_node_by_text(elements, text, nth=nth, field=field, exact=exact, by_id=by_id)
     return None if index is None else _center(_bounds(elements[index]))
 
 
@@ -599,12 +725,16 @@ def find_node_by_text(
     nth: int = 1,
     field: bool = False,
     exact: bool = False,
+    by_id: bool = False,
+    state: dict[str, bool] | None = None,
 ) -> int | None:
     """Index of the element whose label or hint matches ``text``.
 
     Exact matches win over substring ones (``exact`` allows only them),
     interactive elements over static text; ``field`` looks only at text
-    inputs. ``nth`` picks among equals, from 1.
+    inputs. ``nth`` picks among equals, from 1. ``by_id`` matches ``text``
+    against the resource-id instead, whole or after ``:id/``. ``state`` keeps
+    only elements with these flags, e.g. {"selected": True, "enabled": False}.
     """
     wanted = " ".join(text.split()).casefold()
     tiers: dict[int, list[int]] = {}
@@ -613,6 +743,14 @@ def find_node_by_text(
             continue
         is_input = "EditText" in (node.get("class") or "")
         if field and not is_input:
+            continue
+        if state and any(_flag(node, flag) != want for flag, want in state.items()):
+            continue
+        if by_id:
+            if text not in (node.get("resource-id"), profiles.short_id(node)):
+                continue
+            interactive = is_input or node.get("clickable") == "true"
+            tiers.setdefault(0 if interactive else 1, []).append(i)
             continue
         labels = [
             node.get("text") or "",

@@ -29,7 +29,13 @@ description: Testing a mobile app on an Android phone through the artemis MCP se
   earlier are often lost to the splash and entry animations.
 - Close the keyboard with `hide_keyboard`, never with `back`: Back with no keyboard
   shown leaves the screen. The keyboard can hide the tab bar and the end of a list.
-- Screen line format: `[x,y] Class "label" flags`; flags are `tap input scroll selected disabled ...`.
+- Screen line format: `[x,y] Class "label" id=… flags`; flags are
+  `tap input scroll selected checked disabled ...`. An element without text is tapped by its
+  id: `tap_text("close-button", by_id=True)` (a React Native `testID` becomes the id).
+- Check state, not just presence: `wait_for("Overdue, 7", selected=True)`,
+  `wait_for("Light", checked=True)`.
+- After a flow, or when something looks wrong, read `app_log()`: JS warnings and errors,
+  crashes of the app.
 - Wait for loading with `wait_for("text", timeout_ms=...)`, not with sleeps.
 - Take a screenshot only when the visual matters (colors, layout): `take_screenshot`.
   For a bug report use `take_screenshot(save_path=...)` and attach the file to the task.
@@ -53,10 +59,11 @@ steps:
   - back: true
 ```
 
-Steps: `launch`, `stop`, `tap` (text, `{text, nth, timeout_ms}` or `[x, y]`; waits up
-to 3 s for the text), `long_press`, `input: {field, text, clear}`, `hide_keyboard`,
-`expect` (waits up to 3 s; items are text or `{text, exact: true}`), `expect_not`,
-`wait: {text, timeout_ms, gone, exact}`, `scroll: down|up|left|right` or
+Steps: `launch`, `stop`, `tap` (text, `{text|id, nth, timeout_ms}` or `[x, y]`; waits up
+to 3 s for the text), `long_press`, `input: {field|id, text, clear}`, `hide_keyboard`,
+`expect` (waits up to 3 s; items are text or `{text|id, exact, selected, checked,
+enabled, focused}`), `expect_not` (same items), `wait: {text|id, timeout_ms, gone, exact,
+selected, ...}`, `scroll: down|up|left|right` or
 `scroll: {direction, within, until, max_swipes}`, `key`, `back`, `open_link`,
 `screenshot`, `sleep_ms`.
 
@@ -68,6 +75,10 @@ Run with `run_scenario(["phone-scenarios"])` or from a terminal:
 `PYTHONPATH=~/tools/artemis ~/tools/artemis/.venv/bin/python -m wayup.scenario phone-scenarios`
 (exit code 1 on failure).
 Results and failure screenshots go to `.artemis/runs/` (add `.artemis/` to `.gitignore`).
+Each scenario's report ends with the app's logcat: JS warnings and errors, React Native
+native errors and crash lines (without stack frames); other error lines of the app process
+(often vendor noise) are only counted. All of them are saved as `<scenario>-logcat.txt` in
+the run directory. A native error in a passing run is still worth a look.
 
 ## Don't
 - Don't change data without consent: create, delete or send only when asked.

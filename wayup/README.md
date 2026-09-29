@@ -20,6 +20,9 @@ Google's updates merge without conflicts.
 | Closing the keyboard | Back, which navigates away if no keyboard is up | `hide_keyboard`: Back only while the keyboard is shown |
 | Replay without a model | no | YAML scenarios, `run_scenario` / `python -m wayup.scenario` |
 | Weak checks in scenarios | — | `exact` matching; a note on an `expect` that was already true before the last action |
+| Element state | — | `expect: {text, selected / checked / enabled / focused}`, `wait_for(selected=…)` |
+| Elements without text | coordinates | resource-id (React Native `testID`): `{id: …}`, `by_id=true`, `id=` in the screen |
+| App log | — | JS warnings, errors and crashes in each scenario report; `app_log` tool |
 | Personal phone guard | no | `.artemis.json` → `allowed_packages` |
 | Several devices | env only | `list_devices`, `select_device`, `device` in the profile |
 
