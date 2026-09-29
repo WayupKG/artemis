@@ -5,11 +5,14 @@ A scenario is a list of steps; each step is a one-key mapping::
     name: Overdue tasks from home
     app: com.example.app
     steps:
-      - launch: true                  # the scenario app, or a package name
-      - tap: Overdue                  # by label/hint; {text, nth} or [x, y]
+      - launch: true                  # the scenario app, or a package name;
+                                      # returns once the first screen is still
+      - tap: Overdue                  # by label/hint, waits up to 3 s for it;
+                                      # {text, nth, timeout_ms} or [x, y]
       - expect: "Overdue, 7"          # waits up to 3 s; string or list
       - expect_not: Error
       - input: {field: Search tasks…, text: Standup, clear: true}
+      - hide_keyboard: true           # Back only if the keyboard is up
       - wait: {text: TASK-1, timeout_ms: 5000, gone: false}
       - scroll: down                  # down | up | left | right
       - long_press: TASK-3
@@ -34,7 +37,7 @@ from typing import Any
 
 import yaml
 
-from wayup.core import Device, DeviceError, find_by_text
+from wayup.core import FIND_TIMEOUT_MS, Device, DeviceError, find_by_text
 
 DEFAULT_EXPECT_TIMEOUT_MS = 3000
 DEFAULT_RUNS_DIR = ".artemis/runs"
@@ -147,7 +150,11 @@ class Runner:
                 x, y = int(value[0]), int(value[1])
             else:
                 spec = value if isinstance(value, dict) else {"text": value}
-                x, y = await d.find(str(spec["text"]), nth=int(spec.get("nth", 1)))
+                x, y = await d.find(
+                    str(spec["text"]),
+                    nth=int(spec.get("nth", 1)),
+                    timeout_ms=int(spec.get("timeout_ms", FIND_TIMEOUT_MS)),
+                )
             if kind == "tap":
                 await d.tap(x, y)
             else:
@@ -156,6 +163,8 @@ class Runner:
             await d.input_into(
                 str(value["field"]), str(value["text"]), bool(value.get("clear", True))
             )
+        elif kind == "hide_keyboard":
+            await d.hide_keyboard()
         elif kind == "expect":
             timeout = DEFAULT_EXPECT_TIMEOUT_MS
             for text in _as_list(value):
@@ -189,7 +198,17 @@ class Runner:
             await asyncio.sleep(int(value) / 1000)
         else:
             raise ValueError(f"unknown step '{kind}'")
-        if kind in ("launch", "tap", "long_press", "input", "scroll", "key", "back", "open_link"):
+        if kind in (
+            "launch",
+            "tap",
+            "long_press",
+            "input",
+            "hide_keyboard",
+            "scroll",
+            "key",
+            "back",
+            "open_link",
+        ):
             await d.settled_screen()
         return None
 

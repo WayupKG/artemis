@@ -4,7 +4,8 @@ import asyncio
 
 import pytest
 
-from wayup.core import DeviceError, Screen, find_by_text, find_element_at
+from wayup import core
+from wayup.core import Device, DeviceError, Screen, find_by_text, find_element_at
 from wayup.scenario import Runner
 
 
@@ -65,6 +66,91 @@ def test_element_at_point_is_the_smallest():
     assert find_element_at(HOME, 20, 220)["text"] == "Overdue"
 
 
+def _sheet(top):
+    return [
+        _node(
+            "Reset", cls="android.widget.Button", bounds=(0, top, 200, top + 100), clickable="true"
+        )
+    ]
+
+
+class ScriptedDevice(Device):
+    """Real Device logic over a scripted sequence of screens; the last one repeats."""
+
+    def __init__(self, screens, foregrounds=None):
+        super().__init__()
+        self.screens = screens
+        self.foregrounds = foregrounds or ["kg.replai.revision"] * len(screens)
+        self.reads = 0
+        self.keyboard = False
+        self.keys = []
+
+    async def screen(self, show_keyboard=False):
+        i = min(self.reads, len(self.screens) - 1)
+        self.reads += 1
+        elements = self.screens[i]
+        compact = "\n".join(str(n["parsed_bounds"]) + n["text"] for n in elements)
+        return Screen(self.foregrounds[i], elements, compact)
+
+    async def keyboard_shown(self):
+        return self.keyboard
+
+    async def press_key(self, keycode):
+        self.keys.append(keycode)
+        self.keyboard = False
+
+
+@pytest.fixture
+def fast(monkeypatch):
+    monkeypatch.setattr(core, "FIND_POLL_S", 0)
+    monkeypatch.setattr(core, "SETTLE_POLL_S", 0)
+    monkeypatch.setattr(core, "LAUNCH_QUIET_S", 0)
+
+
+def test_find_returns_at_once_when_the_element_is_there(fast):
+    device = ScriptedDevice([_sheet(700)])
+
+    assert asyncio.run(device.find("Reset")) == (100, 750)
+    assert device.reads == 1
+
+
+def test_find_waits_for_a_late_element_to_stop_moving(fast):
+    device = ScriptedDevice([[], _sheet(900), _sheet(700), _sheet(700)])
+
+    assert asyncio.run(device.find("Reset")) == (100, 750)
+    assert device.reads == 4
+
+
+def test_find_gives_up_with_the_last_screen(fast):
+    device = ScriptedDevice([[]])
+
+    with pytest.raises(DeviceError, match="'Reset' on screen after 0 ms"):
+        asyncio.run(device.find("Reset", timeout_ms=0))
+
+
+def test_app_is_ready_once_its_own_screen_is_still(fast):
+    launcher, splash, home = [_node("Apps")], [_node("Revision")], HOME
+    device = ScriptedDevice(
+        [launcher, splash, home, home, home],
+        foregrounds=["launcher"] + ["kg.replai.revision"] * 4,
+    )
+
+    asyncio.run(device.wait_until_ready("kg.replai.revision"))
+
+    assert device.reads == 4
+
+
+def test_hide_keyboard_presses_back_only_while_the_keyboard_is_up(fast):
+    device = ScriptedDevice([HOME])
+
+    assert asyncio.run(device.hide_keyboard()) is False
+    assert device.keys == []
+
+    device.keyboard = True
+    assert asyncio.run(device.hide_keyboard()) is True
+    assert device.keys == ["KEYCODE_BACK"]
+
+
 class FakeDevice:
     """Records actions; the screen is whatever the test sets."""
 
@@ -78,11 +164,16 @@ class FakeDevice:
     async def settled_screen(self):
         return await self.screen()
 
-    async def find(self, text, nth=1, field=False):
+    async def find(self, text, nth=1, field=False, timeout_ms=core.FIND_TIMEOUT_MS):
+        self.actions.append(("find", text, timeout_ms))
         match = find_by_text(self.elements, text, nth=nth, field=field)
         if match is None:
             raise DeviceError(f"no element matching {text!r}")
         return match
+
+    async def hide_keyboard(self):
+        self.actions.append(("hide_keyboard",))
+        return True
 
     async def launch(self, package):
         self.actions.append(("launch", package))
@@ -133,10 +224,27 @@ steps:
     assert result.ok, result.report()
     assert device.actions == [
         ("launch", "kg.replai.revision"),
+        ("find", "Overdue", 3000),
         ("tap", 155, 250),
         ("input", "Search tasks…", "Standup", True),
         ("back",),
     ]
+
+
+def test_scenario_tap_timeout_and_hide_keyboard(tmp_path):
+    device = FakeDevice(HOME)
+    result = _run(
+        tmp_path,
+        """
+steps:
+  - tap: {text: Done, nth: 2, timeout_ms: 8000}
+  - hide_keyboard: true
+""",
+        device,
+    )
+
+    assert result.ok, result.report()
+    assert device.actions == [("find", "Done", 8000), ("tap", 400, 850), ("hide_keyboard",)]
 
 
 def test_scenario_stops_at_first_failure_and_saves_screenshot(tmp_path):

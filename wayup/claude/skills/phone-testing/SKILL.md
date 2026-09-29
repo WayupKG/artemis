@@ -19,6 +19,11 @@ description: Testing a mobile app on an Android phone through the artemis MCP se
   screen once it has settled. **Do not call `get_ui_hierarchy` after them.**
 - Tap by text: `tap_text("Overdue")`; type by field label or hint:
   `input_into("Search tasks…", "Standup")`. Use coordinates only for elements without text.
+  Both wait up to 3 s for the element, so a sheet or screen that is still opening is fine.
+- `launch_app` returns once the app's first screen has been still for 2 s; taps sent
+  earlier are often lost to the splash and entry animations.
+- Close the keyboard with `hide_keyboard`, never with `back`: Back with no keyboard
+  shown leaves the screen. The keyboard can hide the tab bar and the end of a list.
 - Screen line format: `[x,y] Class "label" flags`; flags are `tap input scroll selected disabled ...`.
 - Wait for loading with `wait_for("text", timeout_ms=...)`, not with sleeps.
 - Take a screenshot only when the visual matters (colors, layout): `take_screenshot`.
@@ -43,13 +48,14 @@ steps:
   - back: true
 ```
 
-Steps: `launch`, `stop`, `tap` (text, `{text, nth}` or `[x, y]`), `long_press`,
-`input: {field, text, clear}`, `expect` (waits up to 3 s), `expect_not`,
-`wait: {text, timeout_ms, gone}`, `scroll: down|up|left|right`, `key`, `back`,
-`open_link`, `screenshot`, `sleep_ms`.
+Steps: `launch`, `stop`, `tap` (text, `{text, nth, timeout_ms}` or `[x, y]`; waits up
+to 3 s for the text), `long_press`, `input: {field, text, clear}`, `hide_keyboard`,
+`expect` (waits up to 3 s), `expect_not`, `wait: {text, timeout_ms, gone}`,
+`scroll: down|up|left|right`, `key`, `back`, `open_link`, `screenshot`, `sleep_ms`.
 
 Run with `run_scenario(["phone-scenarios"])` or from a terminal:
-`~/tools/artemis/.venv/bin/python -m wayup.scenario phone-scenarios` (exit code 1 on failure).
+`PYTHONPATH=~/tools/artemis ~/tools/artemis/.venv/bin/python -m wayup.scenario phone-scenarios`
+(exit code 1 on failure).
 Results and failure screenshots go to `.artemis/runs/` (add `.artemis/` to `.gitignore`).
 
 ## Don't

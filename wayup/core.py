@@ -30,6 +30,16 @@ SETTLE_FIRST_DELAY_S = 0.1
 SETTLE_POLL_S = 0.05
 SETTLE_TIMEOUT_S = 2.5
 
+# Tapping by text waits this long for the element to show up.
+FIND_TIMEOUT_MS = 3000
+FIND_POLL_S = 0.1
+
+# After a launch the app counts as ready once its screen has been still this long.
+LAUNCH_QUIET_S = 2.0
+LAUNCH_READY_TIMEOUT_S = 15.0
+
+KEYBOARD_HIDE_TIMEOUT_S = 1.5
+
 
 class DeviceError(Exception):
     """An action was refused or failed; the message is meant for the model."""
@@ -65,14 +75,15 @@ class Device:
     def foreground(self) -> str | None:
         return get_current_foreground_package(self.controller.ctx)
 
+    def _shell(self, command: str) -> str:
+        ctx = self.controller.ctx
+        return str(ctx.adb_client.device(serial=ctx.device.device_id).shell(command))
+
     def _hidden_packages(self) -> set[str]:
         if not self._ime_checked:
             self._ime_checked = True
             try:
-                device = self.controller.ctx.adb_client.device(
-                    serial=self.controller.ctx.device.device_id
-                )
-                ime = str(device.shell("settings get secure default_input_method")).strip()
+                ime = self._shell("settings get secure default_input_method").strip()
                 self._ime_package = ime.split("/")[0] or None
             except Exception as exc:  # pylint: disable=broad-exception-caught
                 logger.debug("IME lookup failed: %s", exc)
@@ -204,6 +215,27 @@ class Device:
         success, error = await launch_app_with_retries(self.controller.ctx, package)
         if not success:
             raise DeviceError(error or f"launch of {package} failed")
+        await self.wait_until_ready(package)
+
+    async def wait_until_ready(self, package: str) -> None:
+        """Waits until ``package`` is on top and its screen has been still for a while.
+
+        The launcher returns as soon as the app shows a window, but a React Native
+        app then swaps the splash for its first screen and animates it in, and taps
+        in that time are lost. A screen that never calms down (a spinner) is given
+        up on after LAUNCH_READY_TIMEOUT_S without an error.
+        """
+        deadline = time.monotonic() + LAUNCH_READY_TIMEOUT_S
+        still_since, previous = time.monotonic(), None
+        while time.monotonic() < deadline:
+            screen = await self.screen()
+            current = screen.compact if screen.foreground == package else None
+            if current is None or current != previous:
+                still_since, previous = time.monotonic(), current
+            elif time.monotonic() - still_since >= LAUNCH_QUIET_S:
+                return
+            await asyncio.sleep(SETTLE_POLL_S)
+        logger.info("%s did not settle within %s s after launch", package, LAUNCH_READY_TIMEOUT_S)
 
     async def stop(self, package: str) -> None:
         self.guard_package(package)
@@ -248,21 +280,61 @@ class Device:
         if not await self.guard().erase_text(nb_chars=1):
             raise DeviceError("erase failed")
 
+    async def keyboard_shown(self) -> bool:
+        output = await asyncio.to_thread(self._shell, "dumpsys input_method | grep mInputShown")
+        return "mInputShown=true" in output
+
+    async def hide_keyboard(self) -> bool:
+        """Closes the on-screen keyboard; returns False if it was not shown.
+
+        Back is pressed only while the keyboard is up, so this never navigates away.
+        """
+        if not await self.keyboard_shown():
+            return False
+        await self.press_key("KEYCODE_BACK")
+        deadline = time.monotonic() + KEYBOARD_HIDE_TIMEOUT_S
+        while time.monotonic() < deadline:
+            await asyncio.sleep(0.1)
+            if not await self.keyboard_shown():
+                return True
+        raise DeviceError("the keyboard is still shown after Back")
+
     # ------------------------------------------------------------------ by text
 
-    async def find(self, text: str, nth: int = 1, field: bool = False) -> tuple[int, int]:
+    async def find(
+        self, text: str, nth: int = 1, field: bool = False, timeout_ms: int = FIND_TIMEOUT_MS
+    ) -> tuple[int, int]:
+        """Center of the matching element, waiting up to ``timeout_ms`` for it.
+
+        A match on the first read is returned at once. One that shows up later
+        means the screen is still changing, so it is returned only when two reads
+        in a row agree on its position: a sheet sliding in is not tapped mid-way.
+        """
+        deadline = time.monotonic() + timeout_ms / 1000
         screen = await self.screen()
         match = find_by_text(screen.elements, text, nth=nth, field=field)
-        if match is None:
-            raise DeviceError(f"no element matching {text!r} on screen:\n{screen.compact}")
-        return match
+        if match is not None:
+            return match
+        while time.monotonic() < deadline:
+            await asyncio.sleep(FIND_POLL_S)
+            screen = await self.screen()
+            previous, match = match, find_by_text(screen.elements, text, nth=nth, field=field)
+            if match is not None and match == previous:
+                return match
+        if match is not None:
+            return match
+        raise DeviceError(
+            f"no element matching {text!r} on screen after {timeout_ms} ms:\n{screen.compact}"
+        )
 
-    async def tap_text(self, text: str, nth: int = 1) -> None:
-        x, y = await self.find(text, nth=nth)
+    async def tap_text(self, text: str, nth: int = 1, timeout_ms: int = FIND_TIMEOUT_MS) -> None:
+        x, y = await self.find(text, nth=nth, timeout_ms=timeout_ms)
         await self.tap(x, y)
 
-    async def input_into(self, field: str, text: str, clear: bool = True) -> None:
-        x, y = await self.find(field, field=True)
+    async def input_into(
+        self, field: str, text: str, clear: bool = True, timeout_ms: int = FIND_TIMEOUT_MS
+    ) -> None:
+        x, y = await self.find(field, field=True, timeout_ms=timeout_ms)
         await self.input_text(x, y, text, clear=clear)
 
     async def wait_for(self, text: str, timeout_ms: int = 5000, gone: bool = False) -> Screen:

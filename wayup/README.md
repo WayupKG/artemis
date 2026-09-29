@@ -13,7 +13,9 @@ Google's updates merge without conflicts.
 | After an action | "Success", screen needs another call | settled screen in the same response |
 | Screenshot | base64 as text, ~1000 ms | MCP image, ~400 ms |
 | Focusing a field before typing | ~2 s (hierarchy + fixed 1 s sleep) | waits for actual focus |
-| Tap / type by visible text | no | `tap_text`, `input_into`, `wait_for` |
+| Tap / type by visible text | no | `tap_text`, `input_into`, `wait_for`; wait up to 3 s for the element |
+| Launching an app | returns when the window shows | returns once the first screen has been still for 2 s |
+| Closing the keyboard | Back, which navigates away if no keyboard is up | `hide_keyboard`: Back only while the keyboard is shown |
 | Replay without a model | no | YAML scenarios, `run_scenario` / `python -m wayup.scenario` |
 | Personal phone guard | no | `.artemis.json` → `allowed_packages` |
 | Several devices | env only | `list_devices`, `select_device`, `device` in the profile |
@@ -57,7 +59,7 @@ The step format is documented in `wayup/scenario.py` and in the
 `phone-testing` skill. Run from a terminal:
 
 ```sh
-~/tools/artemis/.venv/bin/python -m wayup.scenario phone-scenarios/
+PYTHONPATH=~/tools/artemis ~/tools/artemis/.venv/bin/python -m wayup.scenario phone-scenarios/
 ```
 
 Exit code is 1 if any scenario fails. Run output and failure screenshots go

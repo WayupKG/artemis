@@ -20,7 +20,7 @@ from mcp.server.fastmcp import Context, FastMCP, Image
 
 from artemis.mcp import adb_server
 from wayup import profile as profiles
-from wayup.core import Device, DeviceError
+from wayup.core import FIND_TIMEOUT_MS, Device, DeviceError
 from wayup.scenario import run_paths
 
 INSTRUCTIONS = """\
@@ -30,7 +30,10 @@ Android phone control over adb.
 - Action tools return the settled screen after the action, so there is no need
   to call get_ui_hierarchy after them. Screen lines are
   '[x,y] Class "label" flags'; [x,y] is the element center.
-- Prefer tap_text / input_into (by visible label or hint) over coordinates.
+- Prefer tap_text / input_into (by visible label or hint) over coordinates;
+  they wait up to 3 s for the element to appear.
+- Close the keyboard with hide_keyboard, not with Back: it presses Back only
+  while the keyboard is up.
 - Once a flow works, save it as a YAML scenario and replay it with run_scenario;
   replay needs no reasoning per step and is much faster.
 - foreground null usually means the screen is locked: ask the user to unlock.
@@ -152,13 +155,20 @@ async def tap(
 
 
 @_tool()
-async def tap_text(ctx: Context, text: str, nth: int = 1, observe: bool = True) -> str:
+async def tap_text(
+    ctx: Context,
+    text: str,
+    nth: int = 1,
+    observe: bool = True,
+    timeout_ms: int = FIND_TIMEOUT_MS,
+) -> str:
     """Taps the element whose label or hint matches 'text' (case-insensitive).
 
     Exact matches win over substrings, buttons over plain text; 'nth' picks the
-    n-th of equal matches, from 1. Returns the settled screen.
+    n-th of equal matches, from 1. Waits up to 'timeout_ms' for the element to
+    appear. Returns the settled screen.
     """
-    return await _act(lambda: device.tap_text(text, nth=nth), observe)
+    return await _act(lambda: device.tap_text(text, nth=nth, timeout_ms=timeout_ms), observe)
 
 
 @_tool()
@@ -202,7 +212,11 @@ async def press_key(ctx: Context, keycode: str, observe: bool = True) -> str:
 
 @_tool()
 async def launch_app(ctx: Context, package_name: str, observe: bool = True) -> str:
-    """Launches an app by package name (must be allowed by the project profile)."""
+    """Launches an app by package name (must be allowed by the project profile).
+
+    Returns once the app is on top and its screen has been still for 1 s, so the
+    next tap is not lost to the splash or the entry animation.
+    """
     return await _act(lambda: device.launch(package_name), observe)
 
 
@@ -241,9 +255,24 @@ async def input_into(
 ) -> str:
     """Types 'text' into the input whose label or hint matches 'field'.
 
-    Replaces the content unless 'clear' is false. Returns the settled screen.
+    Replaces the content unless 'clear' is false; waits up to 3 s for the field
+    to appear. The keyboard stays open: close it with hide_keyboard. Returns the
+    settled screen.
     """
     return await _act(lambda: device.input_into(field, text, clear=clear), observe)
+
+
+@_tool()
+async def hide_keyboard(ctx: Context, observe: bool = True) -> str:
+    """Closes the on-screen keyboard; does nothing if it is not shown.
+
+    Unlike pressing Back, it never navigates away from the screen.
+    """
+
+    async def action() -> None:
+        await device.hide_keyboard()
+
+    return await _act(action, observe)
 
 
 @_tool()
@@ -303,8 +332,8 @@ async def run_scenario(ctx: Context, paths: list[str]) -> str:
 
     Paths are relative to the project directory. Failures include the screen
     and a screenshot path under .artemis/runs/. See wayup/scenario.py for the
-    step format (launch, tap, input, expect, expect_not, wait, scroll, key,
-    back, open_link, screenshot, sleep_ms, stop).
+    step format (launch, tap, input, hide_keyboard, expect, expect_not, wait,
+    scroll, key, back, open_link, screenshot, sleep_ms, stop).
     """
     missing = [p for p in paths if not Path(p).expanduser().exists()]
     if missing:
